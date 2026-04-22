@@ -1,0 +1,10 @@
+CMakeFiles/
+CMakeCache.txt
+code
+*.o
+*.a
+*.so
+.DS_Store
+*.swp
+*.swo
+*~
