@@ -22,7 +22,7 @@ unsigned int hashString(const std::string& str) {
 
 class FileStorage {
 private:
-    static constexpr int NUM_BUCKETS = 20; // Increased number of buckets
+    static constexpr int NUM_BUCKETS = 20; // Fixed number of files
     std::string base_dir;
 
     std::string getBucketFilename(int bucket_id) const {
@@ -44,18 +44,20 @@ private:
         }
     };
 
-    // Cache for frequently accessed buckets
-    mutable std::unordered_map<int, std::vector<KeyValueEntry>> bucket_cache;
-    mutable std::unordered_map<int, bool> cache_dirty;
-
-    void loadBucket(int bucket_id) const {
-        if (bucket_cache.find(bucket_id) != bucket_cache.end()) {
-            return; // Already loaded
+public:
+    FileStorage(const std::string& dir = "storage") : base_dir(dir) {
+        // Create storage directory if it doesn't exist
+        if (!fs::exists(base_dir)) {
+            fs::create_directory(base_dir);
         }
+    }
 
-        std::vector<KeyValueEntry>& entries = bucket_cache[bucket_id];
+    void insert(const std::string& key, int value) {
+        int bucket_id = getBucketId(key);
         std::string filename = getBucketFilename(bucket_id);
 
+        // Read existing entries
+        std::vector<KeyValueEntry> entries;
         if (fs::exists(filename)) {
             std::ifstream infile(filename, std::ios::binary);
             if (infile.is_open()) {
@@ -67,52 +69,9 @@ private:
             }
         }
 
-        cache_dirty[bucket_id] = false;
-    }
-
-    void saveBucket(int bucket_id) const {
-        if (cache_dirty.find(bucket_id) == cache_dirty.end() || !cache_dirty[bucket_id]) {
-            return; // No changes
-        }
-
-        const std::vector<KeyValueEntry>& entries = bucket_cache[bucket_id];
-        std::string filename = getBucketFilename(bucket_id);
-
-        std::ofstream outfile(filename, std::ios::binary | std::ios::trunc);
-        if (outfile.is_open()) {
-            for (const auto& entry : entries) {
-                outfile.write(reinterpret_cast<const char*>(&entry), sizeof(KeyValueEntry));
-            }
-            outfile.close();
-        }
-
-        cache_dirty[bucket_id] = false;
-    }
-
-public:
-    FileStorage(const std::string& dir = "storage") : base_dir(dir) {
-        // Create storage directory if it doesn't exist
-        if (!fs::exists(base_dir)) {
-            fs::create_directory(base_dir);
-        }
-    }
-
-    ~FileStorage() {
-        // Save all dirty buckets
-        for (auto& [bucket_id, _] : bucket_cache) {
-            saveBucket(bucket_id);
-        }
-    }
-
-    void insert(const std::string& key, int value) {
-        int bucket_id = getBucketId(key);
-        loadBucket(bucket_id);
-
-        std::vector<KeyValueEntry>& entries = bucket_cache[bucket_id];
-
         // Check if key-value pair already exists
         bool found = false;
-        for (auto& entry : entries) {
+        for (const auto& entry : entries) {
             if (!entry.deleted && key == entry.key && value == entry.value) {
                 found = true;
                 break;
@@ -127,37 +86,77 @@ public:
             new_entry.value = value;
             new_entry.deleted = false;
             entries.push_back(new_entry);
-            cache_dirty[bucket_id] = true;
+
+            // Write back all entries
+            std::ofstream outfile(filename, std::ios::binary | std::ios::trunc);
+            if (outfile.is_open()) {
+                for (const auto& entry : entries) {
+                    outfile.write(reinterpret_cast<const char*>(&entry), sizeof(KeyValueEntry));
+                }
+                outfile.close();
+            }
         }
     }
 
     void remove(const std::string& key, int value) {
         int bucket_id = getBucketId(key);
-        loadBucket(bucket_id);
+        std::string filename = getBucketFilename(bucket_id);
 
-        std::vector<KeyValueEntry>& entries = bucket_cache[bucket_id];
+        if (!fs::exists(filename)) {
+            return;
+        }
+
+        // Read all entries
+        std::vector<KeyValueEntry> entries;
+        std::ifstream infile(filename, std::ios::binary);
+        if (infile.is_open()) {
+            KeyValueEntry entry;
+            while (infile.read(reinterpret_cast<char*>(&entry), sizeof(KeyValueEntry))) {
+                entries.push_back(entry);
+            }
+            infile.close();
+        }
 
         // Mark matching entries as deleted
+        bool modified = false;
         for (auto& entry : entries) {
             if (!entry.deleted && key == entry.key && value == entry.value) {
                 entry.deleted = true;
-                cache_dirty[bucket_id] = true;
+                modified = true;
+            }
+        }
+
+        // Write back if modified
+        if (modified) {
+            std::ofstream outfile(filename, std::ios::binary | std::ios::trunc);
+            if (outfile.is_open()) {
+                for (const auto& entry : entries) {
+                    outfile.write(reinterpret_cast<const char*>(&entry), sizeof(KeyValueEntry));
+                }
+                outfile.close();
             }
         }
     }
 
     std::vector<int> find(const std::string& key) {
         int bucket_id = getBucketId(key);
-        loadBucket(bucket_id);
-
-        const std::vector<KeyValueEntry>& entries = bucket_cache[bucket_id];
+        std::string filename = getBucketFilename(bucket_id);
         std::vector<int> result;
 
-        // Collect values for the key
-        for (const auto& entry : entries) {
-            if (!entry.deleted && key == entry.key) {
-                result.push_back(entry.value);
+        if (!fs::exists(filename)) {
+            return result;
+        }
+
+        // Read and collect values for the key
+        std::ifstream infile(filename, std::ios::binary);
+        if (infile.is_open()) {
+            KeyValueEntry entry;
+            while (infile.read(reinterpret_cast<char*>(&entry), sizeof(KeyValueEntry))) {
+                if (!entry.deleted && key == entry.key) {
+                    result.push_back(entry.value);
+                }
             }
+            infile.close();
         }
 
         // Sort in ascending order
