@@ -5,26 +5,44 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
-#include <unordered_set>
+#include <unordered_map>
+#include <cstring>
+#include <cstdio>
 
 namespace fs = std::filesystem;
 
+// Simple hash function for strings
+unsigned int hashString(const std::string& str) {
+    unsigned int hash = 5381;
+    for (char c : str) {
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
+
 class FileStorage {
 private:
+    static constexpr int NUM_BUCKETS = 10; // Fixed number of files
     std::string base_dir;
 
-    std::string getKeyFilename(const std::string& key) const {
-        // Create a safe filename from the key
-        std::string safe_key;
-        for (char c : key) {
-            if (c == '/' || c == '\\' || c == '.' || c == ' ') {
-                safe_key += '_';
-            } else {
-                safe_key += c;
-            }
-        }
-        return base_dir + "/" + safe_key + ".dat";
+    std::string getBucketFilename(int bucket_id) const {
+        return base_dir + "/bucket_" + std::to_string(bucket_id) + ".dat";
     }
+
+    int getBucketId(const std::string& key) const {
+        return hashString(key) % NUM_BUCKETS;
+    }
+
+    // Structure to store key-value pairs in binary format
+    struct KeyValueEntry {
+        char key[65]; // 64 bytes + null terminator
+        int value;
+        bool deleted; // Flag to mark if entry is deleted
+
+        KeyValueEntry() : value(0), deleted(false) {
+            memset(key, 0, sizeof(key));
+        }
+    };
 
 public:
     FileStorage(const std::string& dir = "storage") : base_dir(dir) {
@@ -35,84 +53,103 @@ public:
     }
 
     void insert(const std::string& key, int value) {
-        std::string filename = getKeyFilename(key);
-        std::unordered_set<int> values;
+        int bucket_id = getBucketId(key);
+        std::string filename = getBucketFilename(bucket_id);
 
-        // Read existing values if file exists
+        // Read all existing entries
+        std::vector<KeyValueEntry> entries;
         if (fs::exists(filename)) {
             std::ifstream infile(filename, std::ios::binary);
             if (infile.is_open()) {
-                int val;
-                while (infile.read(reinterpret_cast<char*>(&val), sizeof(int))) {
-                    values.insert(val);
+                KeyValueEntry entry;
+                while (infile.read(reinterpret_cast<char*>(&entry), sizeof(KeyValueEntry))) {
+                    if (!entry.deleted) {
+                        entries.push_back(entry);
+                    }
                 }
                 infile.close();
             }
         }
 
-        // Add new value
-        values.insert(value);
+        // Check if key-value pair already exists
+        bool found = false;
+        for (auto& entry : entries) {
+            if (key == entry.key && value == entry.value) {
+                found = true;
+                break;
+            }
+        }
 
-        // Write back all values
+        // Add new entry if not found
+        if (!found) {
+            KeyValueEntry new_entry;
+            strncpy(new_entry.key, key.c_str(), sizeof(new_entry.key) - 1);
+            new_entry.key[sizeof(new_entry.key) - 1] = '\0';
+            new_entry.value = value;
+            new_entry.deleted = false;
+            entries.push_back(new_entry);
+        }
+
+        // Write all entries back
         std::ofstream outfile(filename, std::ios::binary | std::ios::trunc);
         if (outfile.is_open()) {
-            for (int val : values) {
-                outfile.write(reinterpret_cast<const char*>(&val), sizeof(int));
+            for (const auto& entry : entries) {
+                outfile.write(reinterpret_cast<const char*>(&entry), sizeof(KeyValueEntry));
             }
             outfile.close();
         }
     }
 
     void remove(const std::string& key, int value) {
-        std::string filename = getKeyFilename(key);
+        int bucket_id = getBucketId(key);
+        std::string filename = getBucketFilename(bucket_id);
 
         if (!fs::exists(filename)) {
-            return; // Key doesn't exist, nothing to do
+            return;
         }
 
-        std::unordered_set<int> values;
-
-        // Read existing values
+        // Read all entries
+        std::vector<KeyValueEntry> entries;
         std::ifstream infile(filename, std::ios::binary);
         if (infile.is_open()) {
-            int val;
-            while (infile.read(reinterpret_cast<char*>(&val), sizeof(int))) {
-                if (val != value) {
-                    values.insert(val);
+            KeyValueEntry entry;
+            while (infile.read(reinterpret_cast<char*>(&entry), sizeof(KeyValueEntry))) {
+                if (!entry.deleted && key == entry.key && value == entry.value) {
+                    // Mark as deleted instead of removing
+                    entry.deleted = true;
                 }
+                entries.push_back(entry);
             }
             infile.close();
         }
 
-        // Write back remaining values
+        // Write back all entries
         std::ofstream outfile(filename, std::ios::binary | std::ios::trunc);
         if (outfile.is_open()) {
-            for (int val : values) {
-                outfile.write(reinterpret_cast<const char*>(&val), sizeof(int));
+            for (const auto& entry : entries) {
+                outfile.write(reinterpret_cast<const char*>(&entry), sizeof(KeyValueEntry));
             }
             outfile.close();
-        }
-
-        // If no values left, delete the file
-        if (values.empty()) {
-            fs::remove(filename);
         }
     }
 
     std::vector<int> find(const std::string& key) {
-        std::string filename = getKeyFilename(key);
+        int bucket_id = getBucketId(key);
+        std::string filename = getBucketFilename(bucket_id);
         std::vector<int> result;
 
         if (!fs::exists(filename)) {
             return result;
         }
 
-        // Read all values
+        // Read and collect values for the key
         std::ifstream infile(filename, std::ios::binary);
         if (infile.is_open()) {
-            int val;
-            while (infile.read(reinterpret_cast<char*>(&val), sizeof(int))) {
-                result.push_back(val);
+            KeyValueEntry entry;
+            while (infile.read(reinterpret_cast<char*>(&entry), sizeof(KeyValueEntry))) {
+                if (!entry.deleted && key == entry.key) {
+                    result.push_back(entry.value);
+                }
             }
             infile.close();
         }
